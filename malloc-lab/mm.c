@@ -78,146 +78,6 @@ static void *coalesce(void *bp);
 static void *find_fit(size_t asize);
 static void place(void *bp, size_t asize);
 
-static void place(void *bp, size_t asize) {
-    // **최소 블록 크기는 16byte
-
-    size_t csize = GET_SIZE(HDRP(bp)); // 현재 블록의 크기
-
-    if((csize - asize) >= (2*DSIZE)) {  // 차이가 최소 블록 크기 16보다 같거나 크면 분할
-        PUT(HDRP(bp), PACK(asize, 1));  // 현재 블록에는 필요한 만큼만 할당
-        PUT(FTRP(bp), PACK(asize, 1));
-        bp = NEXT_BLKP(bp);
-        PUT(HDRP(bp), PACK(csize-asize, 0)); // 남은 크기를 다음 블록에 할당 (가용 블록)
-        PUT(FTRP(bp), PACK(csize-asize, 0));
-    } else {
-        PUT(HDRP(bp), PACK(csize, 1));  // 해당 블록 전부 사용
-        PUT(FTRP(bp), PACK(csize, 1));
-    }
-}
-// 묵시적 가용 리스트에서 first fit 검색
-static void *find_fit(size_t asize) {
-    
-    // first fit
-    // for (void *bp = free_listp; GET_SIZE(HDRP(bp)) > 0; bp = NEXT_BLKP(bp)) {
-    //     if (!GET_ALLOC(HDRP(bp)) && (GET_SIZE(HDRP(bp)) >= asize)) {
-    //         return bp;
-    //     }
-    // }
-    // return NULL;
-
-    // next fit
-    // 힙 블록들을 NEXT_BLKP로 순회하는 next-fit
-    void *bp;
-
-    if (last_searched == NULL) {
-        last_searched = free_listp; // 시작 위치 설정(프로로그 다음)
-    }
-
-    // 1) last_searched부터 에필로그(크기 0) 직전까지 스캔
-    for (bp = last_searched; GET_SIZE(HDRP(bp)) > 0; bp = NEXT_BLKP(bp)) {
-        if (!GET_ALLOC(HDRP(bp)) && (GET_SIZE(HDRP(bp)) >= asize)) {
-            last_searched = NEXT_BLKP(bp); // 다음 탐색 시작점 갱신
-            return bp;
-        }
-    }
-
-    // 2) 랩어라운드: 힙 시작(free_listp)부터 last_searched 직전까지 스캔
-    for (bp = free_listp; bp < last_searched; bp = NEXT_BLKP(bp)) {
-        if (!GET_ALLOC(HDRP(bp)) && (GET_SIZE(HDRP(bp)) >= asize)) {
-            last_searched = NEXT_BLKP(bp);
-            return bp;
-        }
-    }
-
-    return NULL; // 적합 블록 없음
-
-    // best fit
-    // void *bp = free_listp;
-    // void *best_fit = NULL;
-    // size_t best_size = SIZE_MAX;
-    
-    // while (bp != NULL) {
-    //     size_t block_size = GET_SIZE(HDRP(bp));
-        
-    //     if (block_size >= asize) {
-    //         if (block_size == asize) {
-    //             // 정확한 크기 - 즉시 반환
-    //             return bp;
-    //         }
-            
-    //         if (block_size < best_size) {
-    //             best_fit = bp;
-    //             best_size = block_size;
-    //         }
-    //     }
-    //     bp = GET_SUCC(bp);
-    // }
-    // return best_fit;
-}
-
-/*
- * 경계 태그 사용
- */
-static void *coalesce(void *bp)
-{
-    size_t prev_alloc = GET_ALLOC(FTRP(PREV_BLKP(bp))); // 이전 블록 할당 상태
-    size_t next_alloc = GET_ALLOC(HDRP(NEXT_BLKP(bp))); // 다음 블록 할당 상태
-    size_t size = GET_SIZE(HDRP(bp));                   // 현재 블록 사이즈
-
-    if(prev_alloc && next_alloc) {  // 모두 할당된 경우
-        return bp;
-    }
-    else if (prev_alloc && !next_alloc) {   // 다음 블록만 빈 경우
-        size += GET_SIZE(HDRP(NEXT_BLKP(bp)));
-        PUT(HDRP(bp), PACK(size, 0));   // 현재 블록 header 재설정
-        // 위에서 header를 재 설정했으므로, FTRP(bp)는 합쳐질 다음 블록의 footer가 됨
-        PUT(FTRP(bp), PACK(size, 0));   // 다음 블록 footer 재설정
-    }
-    else if (!prev_alloc && next_alloc) {   // 이전 블록만 빈 경우
-        size += GET_SIZE(HDRP(PREV_BLKP(bp)));
-        PUT(FTRP(bp), PACK(size, 0));   // 이전 블록 header 재설정
-        PUT(HDRP(PREV_BLKP(bp)), PACK(size, 0));    // 현재 블록 footer 재설정
-        bp = PREV_BLKP(bp); // 이전 블록의 시작점으로 포인터 변경
-    }
-    else {  // 이전 블록과 다음 블록 모두 빈 경우
-        size += GET_SIZE(HDRP(PREV_BLKP(bp))) +
-            GET_SIZE(FTRP(NEXT_BLKP(bp)));
-        PUT(HDRP(PREV_BLKP(bp)), PACK(size, 0));    // 이전 블록 header 재설정
-        PUT(FTRP(NEXT_BLKP(bp)), PACK(size, 0));    // 다음 블록 footer 재설정
-        bp = PREV_BLKP(bp); // 이전 블록의 시작점으로 포인터 변경
-    }
-    return bp;  // 병합된 블록의 포인터 반환
-}
-
-/*
- * 1) 힙이 초기화 될때
- * 2) mm_malloc이 적당한 맞춤 fit을 찾지 못했을 떄
- * 
- * 정렬을 유지하기 위해서 요청한 크기를 인접 2워드의 배수(8바이트)로 반올림하며
- * 그 후에 메모리 시스템으로부터 추가적인 힙 공간을 요청
- */
-static void *extend_heap(size_t words)
-{
-    char *bp;
-    size_t size;
-
-    // 정렬(alignment)을 유지하기 위해 짝수 개의 워드를 할당하라
-    size = (words % 2) ? (words + 1) * WSIZE : words * WSIZE; // 2워드의 가장 가까운 배수로 반올림 (홀수면 1 더해서 곱함)
-
-    // mem_sbrk()의 모든 호출은 Epilogue 블록의 header에 곧 이어서 더블워드 정렬된 메모리를 return
-    if ((long)(bp = mem_sbrk(size)) == -1) {    // 힙 확장
-        return NULL;
-    }
-
-    // 빈 블록의 header와 footer를 초기화하고, 에필로그 헤더(epilogue header)도 설정
-    PUT(HDRP(bp), PACK(size, 0));   // 이 header는 새 가용 블록의 header가 됨(새 빈 블록 header 초기화)
-    PUT(FTRP(bp), PACK(size, 0));   // 마찬가지로 새 빈 블록 footer 초기화
-    PUT(HDRP(NEXT_BLKP(bp)), PACK(0, 1)); // 이 블록의 마지막 워드는 새 에필로그 블록의 header가 됨
-    
-    // 앞쪽(이전) 블록이 free 상태라면 현재 블록과 합쳐라(coalesce)
-    return coalesce(bp); // 이전 heap이 가용 블럭으로 끝났다면, 두개의 가용 블럭을 통합(병합)하기 위해 coalesce 함수를 호출한다. 그리고 통합된 블록의 블록 포인터를 return
-}
-
 /*
  * mm_init - initialize the malloc package.
  * 최초 가용 블록으로 힙 생성하기
@@ -326,4 +186,144 @@ void *mm_realloc(void *ptr, size_t size)
     mm_free(ptr);
 
     return newptr;
+}
+
+static void place(void *bp, size_t asize) {
+    // **최소 블록 크기는 16byte
+
+    size_t csize = GET_SIZE(HDRP(bp)); // 현재 블록의 크기
+
+    if((csize - asize) >= (2*DSIZE)) {  // 차이가 최소 블록 크기 16보다 같거나 크면 분할
+        PUT(HDRP(bp), PACK(asize, 1));  // 현재 블록에는 필요한 만큼만 할당
+        PUT(FTRP(bp), PACK(asize, 1));
+        bp = NEXT_BLKP(bp);
+        PUT(HDRP(bp), PACK(csize-asize, 0)); // 남은 크기를 다음 블록에 할당 (가용 블록)
+        PUT(FTRP(bp), PACK(csize-asize, 0));
+    } else {
+        PUT(HDRP(bp), PACK(csize, 1));  // 해당 블록 전부 사용
+        PUT(FTRP(bp), PACK(csize, 1));
+    }
+}
+// 묵시적 가용 리스트에서 first fit 검색
+static void *find_fit(size_t asize) {
+    
+    // first fit
+    // for (void *bp = free_listp; GET_SIZE(HDRP(bp)) > 0; bp = NEXT_BLKP(bp)) {
+    //     if (!GET_ALLOC(HDRP(bp)) && (GET_SIZE(HDRP(bp)) >= asize)) {
+    //         return bp;
+    //     }
+    // }
+    // return NULL;
+
+    // next fit
+    // 힙 블록들을 NEXT_BLKP로 순회하는 next-fit
+    // void *bp;
+
+    // if (last_searched == NULL) {
+    //     last_searched = free_listp; // 시작 위치 설정(프로로그 다음)
+    // }
+
+    // // 1) last_searched부터 에필로그(크기 0) 직전까지 스캔
+    // for (bp = last_searched; GET_SIZE(HDRP(bp)) > 0; bp = NEXT_BLKP(bp)) {
+    //     if (!GET_ALLOC(HDRP(bp)) && (GET_SIZE(HDRP(bp)) >= asize)) {
+    //         last_searched = NEXT_BLKP(bp); // 다음 탐색 시작점 갱신
+    //         return bp;
+    //     }
+    // }
+
+    // // 2) 랩어라운드: 힙 시작(free_listp)부터 last_searched 직전까지 스캔
+    // for (bp = free_listp; bp < last_searched; bp = NEXT_BLKP(bp)) {
+    //     if (!GET_ALLOC(HDRP(bp)) && (GET_SIZE(HDRP(bp)) >= asize)) {
+    //         last_searched = NEXT_BLKP(bp);
+    //         return bp;
+    //     }
+    // }
+
+    // return NULL; // 적합 블록 없음
+
+    // best fit
+    void *bp = free_listp;
+    void *best_fit = NULL;
+    size_t best_size = (size_t)-1;
+
+    // scan from the first real block (after prologue) to the epilogue
+    for (bp = free_listp; GET_SIZE(HDRP(bp)) > 0; bp = NEXT_BLKP(bp)) {
+        if (!GET_ALLOC(HDRP(bp))) {
+            size_t bsize = GET_SIZE(HDRP(bp));
+            if (bsize >= asize) {
+                if (bsize == asize) {
+                    // perfect fit
+                    return bp;
+                }
+                if (bsize < best_size) {
+                    best_size = bsize;
+                    best_fit = bp;
+                }
+            }
+        }
+    }    
+    return best_fit;
+}
+
+/*
+ * 경계 태그 사용
+ */
+static void *coalesce(void *bp)
+{
+    size_t prev_alloc = GET_ALLOC(FTRP(PREV_BLKP(bp))); // 이전 블록 할당 상태
+    size_t next_alloc = GET_ALLOC(HDRP(NEXT_BLKP(bp))); // 다음 블록 할당 상태
+    size_t size = GET_SIZE(HDRP(bp));                   // 현재 블록 사이즈
+
+    if(prev_alloc && next_alloc) {  // 모두 할당된 경우
+        return bp;
+    }
+    else if (prev_alloc && !next_alloc) {   // 다음 블록만 빈 경우
+        size += GET_SIZE(HDRP(NEXT_BLKP(bp)));
+        PUT(HDRP(bp), PACK(size, 0));   // 현재 블록 header 재설정
+        // 위에서 header를 재 설정했으므로, FTRP(bp)는 합쳐질 다음 블록의 footer가 됨
+        PUT(FTRP(bp), PACK(size, 0));   // 다음 블록 footer 재설정
+    }
+    else if (!prev_alloc && next_alloc) {   // 이전 블록만 빈 경우
+        size += GET_SIZE(HDRP(PREV_BLKP(bp)));
+        PUT(FTRP(bp), PACK(size, 0));   // 이전 블록 header 재설정
+        PUT(HDRP(PREV_BLKP(bp)), PACK(size, 0));    // 현재 블록 footer 재설정
+        bp = PREV_BLKP(bp); // 이전 블록의 시작점으로 포인터 변경
+    }
+    else {  // 이전 블록과 다음 블록 모두 빈 경우
+        size += GET_SIZE(HDRP(PREV_BLKP(bp))) +
+            GET_SIZE(FTRP(NEXT_BLKP(bp)));
+        PUT(HDRP(PREV_BLKP(bp)), PACK(size, 0));    // 이전 블록 header 재설정
+        PUT(FTRP(NEXT_BLKP(bp)), PACK(size, 0));    // 다음 블록 footer 재설정
+        bp = PREV_BLKP(bp); // 이전 블록의 시작점으로 포인터 변경
+    }
+    return bp;  // 병합된 블록의 포인터 반환
+}
+
+/*
+ * 1) 힙이 초기화 될때
+ * 2) mm_malloc이 적당한 맞춤 fit을 찾지 못했을 떄
+ * 
+ * 정렬을 유지하기 위해서 요청한 크기를 인접 2워드의 배수(8바이트)로 반올림하며
+ * 그 후에 메모리 시스템으로부터 추가적인 힙 공간을 요청
+ */
+static void *extend_heap(size_t words)
+{
+    char *bp;
+    size_t size;
+
+    // 정렬(alignment)을 유지하기 위해 짝수 개의 워드를 할당하라
+    size = (words % 2) ? (words + 1) * WSIZE : words * WSIZE; // 2워드의 가장 가까운 배수로 반올림 (홀수면 1 더해서 곱함)
+
+    // mem_sbrk()의 모든 호출은 Epilogue 블록의 header에 곧 이어서 더블워드 정렬된 메모리를 return
+    if ((long)(bp = mem_sbrk(size)) == -1) {    // 힙 확장
+        return NULL;
+    }
+
+    // 빈 블록의 header와 footer를 초기화하고, 에필로그 헤더(epilogue header)도 설정
+    PUT(HDRP(bp), PACK(size, 0));   // 이 header는 새 가용 블록의 header가 됨(새 빈 블록 header 초기화)
+    PUT(FTRP(bp), PACK(size, 0));   // 마찬가지로 새 빈 블록 footer 초기화
+    PUT(HDRP(NEXT_BLKP(bp)), PACK(0, 1)); // 이 블록의 마지막 워드는 새 에필로그 블록의 header가 됨
+    
+    // 앞쪽(이전) 블록이 free 상태라면 현재 블록과 합쳐라(coalesce)
+    return coalesce(bp); // 이전 heap이 가용 블럭으로 끝났다면, 두개의 가용 블럭을 통합(병합)하기 위해 coalesce 함수를 호출한다. 그리고 통합된 블록의 블록 포인터를 return
 }
